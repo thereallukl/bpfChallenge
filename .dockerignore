@@ -5,3 +5,4 @@ main
 .dockerignore
 Dockerfile
 README.md
+vagrant/
