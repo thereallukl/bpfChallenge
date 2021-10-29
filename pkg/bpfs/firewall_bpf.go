@@ -33,10 +33,10 @@ static inline struct iphdr* get_src_ip(void *data, u64 nh_off, void *data_end) {
 
     if ((void*)&iph[1] > data_end)
         return 0;
-    return bpf_ntohl(iph->saddr);
+    return bpf_htonl(iph->saddr);
 }
 
-// function name must match progName when loading module from GO
+// function name must match GetName() when loading module from GO
 int xdp_firewall(struct xdp_md *ctx) {
 
     void* data_end = (void*)(long)ctx->data_end;

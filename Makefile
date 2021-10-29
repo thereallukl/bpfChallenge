@@ -1,5 +1,5 @@
 .PHONY: all
-all: build test clean docker docker-push
+all: build test test-coverage clean docker docker-push
 .DEFAULT_GOAL:= build
 # CGO_FLAGS = "-I/usr/lib/bcc/include/ -I/lib/modules/5.11.0-37-generic/build/include -I/usr/include/bpfs"
 
@@ -8,6 +8,9 @@ build:
 
 test:
 	go test ./...
+
+test-coverage:
+	go test ./... -cover
 
 docker:
 	docker build -t bpf-challenge .
