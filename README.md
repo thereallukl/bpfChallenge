@@ -1,5 +1,6 @@
 # BPF Challenge
 
+BPF challenge app was developed and tested on ubuntu 21.10. For time being it's only supported distribution
 ## Dependencies
 install required packages
 ```
