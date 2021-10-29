@@ -38,7 +38,6 @@ make docker
 
 Run app in docker container
 ```bash
-// install linux-headers on host
 docker run -t --net=host --privileged bpf-challenge <interface_name>
 ```
 
