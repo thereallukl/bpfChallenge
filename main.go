@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"os/user"
+	"syscall"
 	"time"
 
 	"bpfChallenge/pkg/bpfs"
@@ -34,7 +36,7 @@ var newConnectionCounter = prometheus.NewCounter(prometheus.CounterOpts{
 
 type IncomingConnectionTuple struct {
 	srcIp           net.IP
-	destinationPort int
+	destinationPort layers.TCPPort
 	timestamp       time.Time
 }
 
@@ -66,21 +68,19 @@ func getMacAddr(name string) (string, error) {
 }
 
 const (
-	xdpProg = "xdp_firewall"
-	// pcapQuery could be moved to config file in future
-	// query below select packets with only tcp-syn flag set for which destination mac is local interface
+	// it would be nice to move those parameters to config file in future
 	pcapQueryTemplate = "tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn and ether dst %s"
-	// timeWindowSeconds could be moved to config file in future
-	timeWindowSeconds     = 60
-	maximumPortsConnected = 3
+	timeWindowSeconds  = 60
+	maximumConnections = 3
 )
+
+var portScanPackets = make(map[uint32]*[]IncomingConnectionTuple)
 
 func main() {
 	//var wg sync.WaitGroup
-	var device string
+	var deviceName string
 	var handle *pcap.Handle
 
-	//var portScanPackets map[int]IncomingConnectionTuple
 	// loading bpf programs requires root
 	if !isRoot() {
 		fmt.Println("This requires root privilege. Please run with sudo. Exiting.")
@@ -92,72 +92,119 @@ func main() {
 	}
 	// support more than 1 interface? maybe in future releases :P
 	// optionally check if interface exists, if not print nice message and quit
-	device = os.Args[1]
+	deviceName = os.Args[1]
 
-	macAddr, err := getMacAddr(device)
+	macAddr, err := getMacAddr(deviceName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read mac addr of %s interface", device)
+		fmt.Fprintf(os.Stderr, "Failed to read mac addr of %s interface", deviceName)
 	}
-	pcapQuery := fmt.Sprintf(pcapQueryTemplate, macAddr)
-	fmt.Println(pcapQuery)
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+
 	//compile module
-	module := bpf.NewModule(bpfs.SourceFirewall, bpfs.GetCompilationFlagsFirewall())
+	module := bpf.NewModule(bpfs.BPFPrograms["Firewall"].GetSource(), bpfs.BPFPrograms["Firewall"].GetCompilationFlags())
 	defer module.Close()
 
-	fn, err := module.Load(xdpProg, C.BPF_PROG_TYPE_XDP, 1, 65536)
+	fn, err := module.Load(bpfs.BPFPrograms["Firewall"].GetName(), C.BPF_PROG_TYPE_XDP, 1, 65536)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load xdp prog: %v\n", err)
-		os.Exit(1)
+		return
 	}
-	err = module.AttachXDP(device, fn)
+	err = module.AttachXDP(deviceName, fn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to attach xdp prog: %v\n", err)
-		os.Exit(1)
+		return
 	}
 
-	// unload BPF program upon exit
+	// unload BPF program on exit
 	defer func() {
-		if err := module.RemoveXDP(device); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to remove XDP from %s: %v\n", device, err)
+		if err := module.RemoveXDP(deviceName); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to remove XDP from %s: %v\n", deviceName, err)
 		}
 	}()
 
-	//blockIps := bpf.NewTable(module.TableId("block_ips"), module)
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, os.Kill)
+	blockIps := bpf.NewTable(module.TableId("block_ips"), module)
 
 	go servePrometheus()
 
-	if handle, err = pcap.OpenLive(device, 1600, true, pcap.BlockForever); err != nil {
-		panic(err)
+	pcapQuery := fmt.Sprintf(pcapQueryTemplate, macAddr)
+	fmt.Println(pcapQuery)
+	if handle, err = pcap.OpenLive(deviceName, 1600, true, pcap.BlockForever); err != nil {
+		fmt.Fprintf(os.Stderr, "%s", err)
+		return
 	} else if err = handle.SetBPFFilter(pcapQuery); err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "%s", err)
+		return
 	}
 	// process packets
+
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	for {
 		select {
 		case packet := <-packetSource.Packets():
-			handleSinglePacket(packet)
+			handlePacket(packet, blockIps)
 		case <-sig: // CTRL+C pressed quit program
 			return
-		default:
 		}
 	}
 }
 
-func handlePackets(device string) {
-
-}
-
-func handleSinglePacket(packet gopacket.Packet) {
-	//fmt.Println(packet.String())
+func handlePacket(packet gopacket.Packet, blockIps *bpf.Table) {
+	ts := time.Now()
+	var incomingConnections *[]IncomingConnectionTuple
+	var ok bool
 	pktIPv4Layer, _ := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 	pktTcpLayer, _ := packet.Layer(layers.LayerTypeTCP).(*layers.TCP)
+	// pretty print incomfing connection log
 	printIncomingConnection(pktIPv4Layer, pktTcpLayer)
+	// increase prometheus counter
 	newConnectionCounter.Add(1)
-	//trackPacket()
+
+	srcIP := pktIPv4Layer.SrcIP
+	srcIPIndex := binary.BigEndian.Uint32(srcIP)
+	incomingConnections, ok = portScanPackets[srcIPIndex];
+	if !ok {
+		incomingConnections = new([]IncomingConnectionTuple)
+	}
+	*incomingConnections = append(*incomingConnections, IncomingConnectionTuple{
+		srcIp:           pktIPv4Layer.SrcIP,
+		destinationPort: pktTcpLayer.DstPort,
+		timestamp:       ts,
+	})
+	// check if more than 3 connections happened during last 60 seconds
+	removeOldConnections(&incomingConnections, ts.Add(time.Duration(-timeWindowSeconds) * time.Second))
+
+	if countUniquePorts(*incomingConnections) > maximumConnections {
+		bs := make([]byte, 4)
+		//bpf.GetHostByteOrder().PutUint32(bs, srcIPIndex)
+		binary.LittleEndian.PutUint32(bs, srcIPIndex)
+		blockIps.Set(bs, []byte{1})
+	}
+	portScanPackets[srcIPIndex] = incomingConnections
+}
+
+func countUniquePorts(connections []IncomingConnectionTuple) int {
+	var ports = make(map[int]int)
+	for _, connection := range connections {
+		ports[int(connection.destinationPort)]=1
+	}
+	return len(ports)
+}
+
+func removeOldConnections(connections **[]IncomingConnectionTuple, oldest time.Time) {
+	// if number of overall new connections less than allowed do nothing
+	if len(**connections) <= maximumConnections {
+		return
+	}
+	// remove old connections
+	newConnections := new([]IncomingConnectionTuple)
+	for _, connection := range **connections {
+		if connection.timestamp.After(oldest) {
+			*newConnections = append(*newConnections, connection)
+		}
+	}
+	*connections = newConnections
 }
 
 func printIncomingConnection(pktIPv4Layer *layers.IPv4, pktTcpLayer *layers.TCP) {
@@ -167,12 +214,9 @@ func printIncomingConnection(pktIPv4Layer *layers.IPv4, pktTcpLayer *layers.TCP)
 }
 
 func servePrometheus() {
-	//defer wg.Done()
 	http.Handle("/metrics", promhttp.HandlerFor(prometheus.DefaultGatherer,
 		promhttp.HandlerOpts{
 			EnableOpenMetrics: false,
 		}))
 	fmt.Errorf("failed to start prometheus endpoint: %s", http.ListenAndServe(":8080", nil))
 }
-
-//func trackPacket

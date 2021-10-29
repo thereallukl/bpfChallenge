@@ -1,10 +1,17 @@
 package bpfs
 
-func GetCompilationFlagsFirewall() []string {
+type FirewallBpfImpl struct{}
+
+func (c FirewallBpfImpl) GetCompilationFlags() []string {
 	return []string{"-w", "-I/usr/include", "-I/usr/include/linux", "-I/usr/include/x86_64-linux-gnu"}
 }
 
-const SourceFirewall string = `
+func (c FirewallBpfImpl) GetName() string {
+	return "xdp_firewall"
+}
+
+func (c FirewallBpfImpl) GetSource() string {
+	return `
 #define KBUILD_MODNAME "foo"
 #include <uapi/linux/bpf.h>
 #include <linux/version.h>
@@ -45,7 +52,7 @@ int xdp_firewall(struct xdp_md *ctx) {
 
     nh_off = sizeof(*eth);
 	if (data + nh_off  > data_end) {
-		bpf_trace_printk("Passing packet1");
+		bpf_trace_printk("Passing packet");
         return XDP_PASS;
 	}
     h_proto = eth->h_proto;
@@ -61,7 +68,7 @@ int xdp_firewall(struct xdp_md *ctx) {
 			return XDP_DROP;
 		}
 	}
-	bpf_trace_printk("Not found IPv4 packet: %d\n", h_proto);
 	return XDP_PASS;
 }
 `
+}
