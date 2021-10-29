@@ -13,6 +13,7 @@ apt install -y \
     libbpf-dev \
     bpfcc-tools \
     linux-headers-$(uname -r) \
+    linux-headers-generic \
     libpcap0.8 \
     bcc
 ```
@@ -36,5 +37,13 @@ make docker
 
 Run app in docker container
 ```bash
-docker run -t --net=host -v /lib/modules:/lib/modules -v /usr/src/:/usr/src/ -v /usr/include:/usr/include --privileged bpf-challenge <interface_name>
+// install linux-headers on host
+apt update && apt install -y linux-headers-generic
+docker run -t --net=host -v /lib/modules:/lib/modules --privileged bpf-challenge <interface_name>
+```
+
+## Troubleshooting
+In case application crashes and fail to unload BPF program upon exit, user can manually remove it
+```bash
+sudo ip l set dev <interface_name> xdpgeneric off
 ```

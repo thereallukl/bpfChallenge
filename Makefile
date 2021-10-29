@@ -13,7 +13,7 @@ test-coverage:
 	go test ./... -cover
 
 docker:
-	docker build -t bpf-challenge .
+	docker build --no-cache -t bpf-challenge .
 
 docker-push:
 	echo "Not implemented ;P"

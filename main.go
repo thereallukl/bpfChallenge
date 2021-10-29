@@ -149,7 +149,7 @@ func processIncomingPacket(packet gopacket.Packet, blockIps *bpf.Table) (block b
 
 	pktIPv4Layer, _ := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 	pktTcpLayer, _ := packet.Layer(layers.LayerTypeTCP).(*layers.TCP)
-	// pretty print incomfing connection log
+	// pretty print incoming connection log
 	utils.PrintIncomingConnection(pktIPv4Layer, pktTcpLayer)
 
 
@@ -166,13 +166,13 @@ func processIncomingPacket(packet gopacket.Packet, blockIps *bpf.Table) (block b
 	})
 	// check if more than 3 connections happened during last 60 seconds
 	// if number of overall new connections less than allowed do nothing
-	if len(*incomingConnections) < maximumConnections {
+	if len(*incomingConnections) > maximumConnections {
 		utils.RemoveOldConnections(&incomingConnections,
 			ts.Add(time.Duration(-timeWindowSeconds) * time.Second))
 	}
 	portScanPackets[srcIPIndex] = incomingConnections
 	if utils.CountUniquePorts(*incomingConnections) > maximumConnections {
-		//blockSourceAddress(srcIPIndex, blockIps)
+		//fmt.Printf("Block IP %d, elements in list %d", srcIP, len(*incomingConnections))
 		return true, srcIP
 	}
 	return false, nil
